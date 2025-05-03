@@ -1,0 +1,444 @@
+/**
+ * MotherIntegration.js
+ * Client-side integration for the MOTHER orchestration system.
+ * 
+ * This module extends the existing WebSocket communication to support
+ * MOTHER commands and inter-LLM conversations.
+ */
+
+// Import necessary modules
+import { WebSocketManager } from './WebSocketManager.js';
+import { StorageService } from './StorageService.js';
+import { helpers } from './Helpers.js';
+
+export class MotherIntegration {
+    /**
+     * Initialize MOTHER integration.
+     * @param {WebSocketManager} websocketManager - The WebSocket manager instance
+     */
+    constructor(websocketManager) {
+        this.websocket = websocketManager;
+        
+        // Active LLMs in the system
+        this.activeLLMs = new Map();
+        
+        // Track active conversations
+        this.activeConversations = new Map();
+        
+        // Voice settings
+        this.voiceSettings = new Map();
+        
+        // Debug mode for LLM-only communication
+        this.debugMode = false;
+        
+        // Register message handlers
+        this._registerMessageHandlers();
+        
+        // Create UI elements for MOTHER controls
+        this._setupMotherUI();
+    }
+    
+    /**
+     * Register WebSocket message handlers.
+     * @private
+     */
+    _registerMessageHandlers() {
+        // Handler for receiving LLM list
+        this.websocket.registerHandler('mother_llm_list', (message) => {
+            this._handleLLMListUpdate(message.llms);
+        });
+        
+        // Handler for updating voice settings
+        this.websocket.registerHandler('mother_voice_set', (message) => {
+            this._handleVoiceUpdate(message);
+        });
+        
+        // Handler for receiving conversation updates
+        this.websocket.registerHandler('mother_conversation_update', (message) => {
+            this._handleConversationUpdate(message);
+        });
+        
+        // Handler for receiving LLM debug messages
+        this.websocket.registerHandler('mother_debug_message', (message) => {
+            this._handleDebugMessage(message);
+        });
+    }
+    
+    /**
+     * Set up the MOTHER UI controls.
+     * @private
+     */
+    _setupMotherUI() {
+        // Create container for MOTHER controls
+        const container = document.createElement('div');
+        container.id = 'mother-controls';
+        container.className = 'mt-4 p-4 bg-gray-100 rounded hidden';
+        
+        // Add LLM conversation controls
+        const conversationControls = this._createConversationControls();
+        container.appendChild(conversationControls);
+        
+        // Add voice controls
+        const voiceControls = this._createVoiceControls();
+        container.appendChild(voiceControls);
+        
+        // Add debug window
+        const debugWindow = this._createDebugWindow();
+        container.appendChild(debugWindow);
+        
+        // Add to the document
+        const mainContent = document.querySelector('main') || document.body;
+        mainContent.appendChild(container);
+        
+        // Add MOTHER button to main controls
+        this._addMotherButton();
+    }
+    
+    /**
+     * Create the conversation controls UI.
+     * @private
+     * @returns {HTMLElement} The conversation controls element
+     */
+    _createConversationControls() {
+        const container = document.createElement('div');
+        container.className = 'mb-4';
+        
+        // Add heading
+        const heading = document.createElement('h3');
+        heading.className = 'text-lg font-semibold mb-2';
+        heading.textContent = 'LLM Conversations';
+        container.appendChild(heading);
+        
+        // Add LLM selection
+        const llmSelector = document.createElement('div');
+        llmSelector.className = 'mb-2';
+        llmSelector.innerHTML = `
+            <p class="mb-1">Select LLMs for conversation:</p>
+            <div id="mother-llm-checkboxes" class="flex flex-wrap gap-2"></div>
+        `;
+        container.appendChild(llmSelector);
+        
+        // Add button to create conversation
+        const createButton = document.createElement('button');
+        createButton.id = 'create-llm-conversation';
+        createButton.className = 'bg-blue-500 text-white px-3 py-1 rounded';
+        createButton.textContent = 'Create Conversation';
+        createButton.addEventListener('click', () => this._createLLMConversation());
+        container.appendChild(createButton);
+        
+        // Add container for active conversations
+        const conversationsContainer = document.createElement('div');
+        conversationsContainer.id = 'mother-active-conversations';
+        conversationsContainer.className = 'mt-3';
+        container.appendChild(conversationsContainer);
+        
+        return container;
+    }
+    
+    /**
+     * Create the voice controls UI.
+     * @private
+     * @returns {HTMLElement} The voice controls element
+     */
+    _createVoiceControls() {
+        const container = document.createElement('div');
+        container.className = 'mb-4';
+        
+        // Add heading
+        const heading = document.createElement('h3');
+        heading.className = 'text-lg font-semibold mb-2';
+        heading.textContent = 'LLM Voices';
+        container.appendChild(heading);
+        
+        // Add voice selection form
+        const voiceForm = document.createElement('div');
+        voiceForm.className = 'flex flex-col gap-2';
+        voiceForm.innerHTML = `
+            <div class="flex flex-wrap gap-2 items-center">
+                <label for="mother-llm-voice-select">LLM:</label>
+                <select id="mother-llm-voice-select" class="p-1 border rounded">
+                    <option value="">Select an LLM</option>
+                </select>
+            </div>
+            
+            <div class="flex flex-wrap gap-2 items-center">
+                <label for="mother-voice-select">Voice:</label>
+                <select id="mother-voice-select" class="p-1 border rounded">
+                    <option value="v2/en_speaker_1">Male Voice 1</option>
+                    <option value="v2/en_speaker_2">Male Voice 2</option>
+                    <option value="v2/en_speaker_3">Male Voice 3</option>
+                    <option value="v2/en_speaker_4">Female Voice 1</option>
+                    <option value="v2/en_speaker_5">Female Voice 2</option>
+                    <option value="v2/en_speaker_6">Female Voice 3</option>
+                    <option value="v2/en_speaker_7">Female Voice 4</option>
+                    <option value="v2/en_speaker_8">Male Voice 4</option>
+                    <option value="v2/en_speaker_9">Male Voice 5</option>
+                </select>
+            </div>
+            
+            <button id="set-llm-voice" class="bg-blue-500 text-white px-3 py-1 rounded self-start">
+                Set Voice
+            </button>
+        `;
+        
+        container.appendChild(voiceForm);
+        
+        // Add event listener to the Set Voice button
+        setTimeout(() => {
+            document.getElementById('set-llm-voice')?.addEventListener('click', () => {
+                this._setLLMVoice();
+            });
+        }, 100);
+        
+        return container;
+    }
+    
+    /**
+     * Create the debug window for LLM-only conversations.
+     * @private
+     * @returns {HTMLElement} The debug window element
+     */
+    _createDebugWindow() {
+        const container = document.createElement('div');
+        container.className = 'mt-4';
+        
+        // Add heading with toggle
+        const headingContainer = document.createElement('div');
+        headingContainer.className = 'flex justify-between items-center mb-2';
+        
+        const heading = document.createElement('h3');
+        heading.className = 'text-lg font-semibold';
+        heading.textContent = 'LLM Debug Console';
+        headingContainer.appendChild(heading);
+        
+        const toggleButton = document.createElement('button');
+        toggleButton.id = 'toggle-debug-mode';
+        toggleButton.className = 'bg-gray-500 text-white px-2 py-1 text-sm rounded';
+        toggleButton.textContent = 'Enable Debug Mode';
+        toggleButton.addEventListener('click', () => this._toggleDebugMode());
+        headingContainer.appendChild(toggleButton);
+        
+        container.appendChild(headingContainer);
+        
+        // Create debug console
+        const debugConsole = document.createElement('div');
+        debugConsole.id = 'mother-debug-console';
+        debugConsole.className = 'bg-black text-green-400 p-3 rounded font-mono text-sm h-60 overflow-y-auto hidden';
+        container.appendChild(debugConsole);
+        
+        return container;
+    }
+    
+    /**
+     * Add MOTHER button to main controls.
+     * @private
+     */
+    _addMotherButton() {
+        // Find the element to append to
+        const controlsContainer = document.querySelector('#query-section .flex.space-x-2') || 
+                                 document.querySelector('.flex.space-x-2');
+        
+        if (!controlsContainer) {
+            console.warn('Could not find controls container for MOTHER button');
+            return;
+        }
+        
+        // Create the MOTHER button
+        const motherButton = document.createElement('button');
+        motherButton.id = 'toggle-mother-panel';
+        motherButton.className = 'bg-purple-600 text-white px-3 py-1 rounded';
+        motherButton.textContent = 'MOTHER';
+        motherButton.title = 'Toggle MOTHER Orchestration Panel';
+        
+        // Add event listener
+        motherButton.addEventListener('click', () => {
+            const motherControls = document.getElementById('mother-controls');
+            if (motherControls) {
+                motherControls.classList.toggle('hidden');
+            }
+        });
+        
+        // Add to the container
+        controlsContainer.appendChild(motherButton);
+    }
+    
+    /**
+     * Toggle debug mode for LLM-only communication.
+     * @private
+     */
+    _toggleDebugMode() {
+        this.debugMode = !this.debugMode;
+        
+        const toggleButton = document.getElementById('toggle-debug-mode');
+        const debugConsole = document.getElementById('mother-debug-console');
+        
+        if (toggleButton) {
+            toggleButton.textContent = this.debugMode ? 'Disable Debug Mode' : 'Enable Debug Mode';
+            toggleButton.className = this.debugMode ? 
+                'bg-red-500 text-white px-2 py-1 text-sm rounded' : 
+                'bg-gray-500 text-white px-2 py-1 text-sm rounded';
+        }
+        
+        if (debugConsole) {
+            debugConsole.classList.toggle('hidden', !this.debugMode);
+            
+            if (this.debugMode) {
+                // Add some intro text to the debug console
+                this._addDebugMessage('MOTHER', 'Debug mode enabled. LLM-only communications will be displayed here.');
+                this._addDebugMessage('MOTHER', 'LLM conversations are private and not visible to users in normal mode.');
+            }
+        }
+    }
+    
+    /**
+     * Handle update to the list of active LLMs.
+     * @private
+     * @param {Array} llms - List of active LLMs
+     */
+    _handleLLMListUpdate(llms) {
+        // Update our local map
+        this.activeLLMs.clear();
+        llms.forEach(llm => {
+            this.activeLLMs.set(llm.name, llm);
+        });
+        
+        // Update the LLM checkboxes for conversations
+        const checkboxContainer = document.getElementById('mother-llm-checkboxes');
+        if (checkboxContainer) {
+            checkboxContainer.innerHTML = '';
+            
+            llms.forEach(llm => {
+                const checkbox = document.createElement('div');
+                checkbox.className = 'flex items-center';
+                checkbox.innerHTML = `
+                    <input type="checkbox" id="llm-${llm.name}" value="${llm.name}" class="mr-1">
+                    <label for="llm-${llm.name}">${llm.name}</label>
+                `;
+                checkboxContainer.appendChild(checkbox);
+            });
+        }
+        
+        // Update the LLM select for voice settings
+        const llmSelect = document.getElementById('mother-llm-voice-select');
+        if (llmSelect) {
+            // Keep the first option
+            const firstOption = llmSelect.options[0];
+            llmSelect.innerHTML = '';
+            llmSelect.appendChild(firstOption);
+            
+            // Add options for each LLM
+            llms.forEach(llm => {
+                const option = document.createElement('option');
+                option.value = llm.name;
+                option.textContent = llm.name;
+                llmSelect.appendChild(option);
+            });
+        }
+    }
+    
+    /**
+     * Handle update to voice settings.
+     * @private
+     * @param {Object} message - Voice update message
+     */
+    _handleVoiceUpdate(message) {
+        const { llm_name, voice_id, success } = message;
+        
+        if (success) {
+            // Update local voice settings
+            this.voiceSettings.set(llm_name, voice_id);
+            
+            // Show success message
+            this._showNotification(`Voice for ${llm_name} set to ${voice_id.split('/').pop()}`);
+        } else {
+            // Show error message
+            this._showNotification(`Failed to set voice for ${llm_name}`, 'error');
+        }
+    }
+    
+    /**
+     * Handle conversation update message.
+     * @private
+     * @param {Object} message - Conversation update message
+     */
+    _handleConversationUpdate(message) {
+        const { conversation_id, participants, status } = message;
+        
+        // Update local tracking
+        if (status === 'created') {
+            this.activeConversations.set(conversation_id, participants);
+            this._showNotification(`Conversation between ${participants.join(', ')} created`);
+            this._updateConversationList();
+        } else if (status === 'ended') {
+            this.activeConversations.delete(conversation_id);
+            this._showNotification(`Conversation ${conversation_id} ended`);
+            this._updateConversationList();
+        }
+    }
+    
+    /**
+     * Handle debug message from LLM-only communication.
+     * @private
+     * @param {Object} message - Debug message
+     */
+    _handleDebugMessage(message) {
+        const { sender, recipient, content } = message;
+        
+        // Only show if debug mode is enabled
+        if (this.debugMode) {
+            this._addDebugMessage(sender, content, recipient);
+        }
+    }
+    
+    /**
+     * Add a message to the debug console.
+     * @private
+     * @param {string} sender - Message sender
+     * @param {string} content - Message content
+     * @param {string} recipient - Message recipient
+     */
+    _addDebugMessage(sender, content, recipient = null) {
+        const debugConsole = document.getElementById('mother-debug-console');
+        if (!debugConsole) return;
+        
+        const timestamp = new Date().toLocaleTimeString();
+        const messageElement = document.createElement('div');
+        
+        // Format the message with color coding
+        let header = '';
+        if (recipient) {
+            header = `<span class="text-yellow-400">[${timestamp}] ${sender} → ${recipient}:</span> `;
+        } else {
+            header = `<span class="text-blue-400">[${timestamp}] ${sender}:</span> `;
+        }
+        
+        messageElement.innerHTML = `${header}${helpers.escapeHtml(content)}`;
+        debugConsole.appendChild(messageElement);
+        
+        // Auto-scroll to bottom
+        debugConsole.scrollTop = debugConsole.scrollHeight;
+    }
+    
+    /**
+     * Create a conversation between LLMs.
+     * @private
+     */
+    _createLLMConversation() {
+        // Get selected LLMs
+        const selectedLLMs = [];
+        document.querySelectorAll('#mother-llm-checkboxes input:checked').forEach(checkbox => {
+            selectedLLMs.push(checkbox.value);
+        });
+        
+        if (selectedLLMs.length < 2) {
+            this._showNotification('Please select at least two LLMs for conversation', 'error');
+            return;
+        }
+        
+        // Send message to create conversation
+        this.websocket.send({
+            type: 'mother_enable_conversation',
+            llms: selectedLLMs
+        });
+        
+        
